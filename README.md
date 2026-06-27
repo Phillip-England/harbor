@@ -35,3 +35,12 @@ Harbor shells out to the local `docker` command. When Docker is missing, Harbor 
 
 Docker Desktop still needs to be opened once after installation so it can finish setup and start the daemon. Linux users may need to log out and back in before running Docker without `sudo`.
 Installation output is shown in the status screen while the installer runs.
+
+On Linux, Harbor cannot read a `sudo` password from inside the TUI. If Docker installation needs elevated privileges, quit Harbor and run:
+
+```sh
+sudo -v
+go run .
+```
+
+Then press `i` from the status screen before the sudo timestamp expires.

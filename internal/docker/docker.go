@@ -132,6 +132,9 @@ func installLinux(ctx context.Context, output OutputFunc) (string, error) {
 		if !hasCommand("sudo") {
 			return "", errors.New("sudo is required to install Docker automatically on Linux when not running as root")
 		}
+		if !sudoCanRunNonInteractive(ctx) {
+			return "", errors.New("Docker installation needs sudo privileges, but Harbor cannot safely read a sudo password inside the TUI. Quit Harbor, run `sudo -v`, start Harbor again from the same terminal, then press `i` again. Alternatively, run Harbor as root.")
+		}
 		installer = downloader + " | sudo -E sh"
 	}
 
@@ -220,6 +223,13 @@ func RunContainer(ctx context.Context, opts RunOptions) (string, error) {
 func hasCommand(name string) bool {
 	_, err := exec.LookPath(name)
 	return err == nil
+}
+
+func sudoCanRunNonInteractive(ctx context.Context) bool {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	return exec.CommandContext(ctx, "sudo", "-n", "true").Run() == nil
 }
 
 func run(ctx context.Context, name string, args ...string) (string, error) {
