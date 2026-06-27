@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"runtime"
 	"strings"
@@ -65,14 +66,70 @@ func CheckStatus(ctx context.Context) Status {
 func InstallHint() string {
 	switch runtime.GOOS {
 	case "darwin":
-		return "macOS: install Docker Desktop from https://docs.docker.com/desktop/setup/install/mac-install/ or run `brew install --cask docker`."
+		if hasCommand("brew") {
+			return "macOS: press i to install Docker Desktop with Homebrew, or install manually from https://docs.docker.com/desktop/setup/install/mac-install/."
+		}
+		return "macOS: install Homebrew for one-key install support, or install Docker Desktop from https://docs.docker.com/desktop/setup/install/mac-install/."
 	case "linux":
-		return "Linux: install Docker Engine using your distro package manager. Ubuntu/Debian users can follow https://docs.docker.com/engine/install/ubuntu/."
+		return "Linux: press i to install Docker Engine with Docker's convenience script for development machines, or follow https://docs.docker.com/engine/install/."
 	case "windows":
+		if hasCommand("winget") {
+			return "Windows: press i to install Docker Desktop with winget, or install manually from https://docs.docker.com/desktop/setup/install/windows-install/."
+		}
 		return "Windows: install Docker Desktop from https://docs.docker.com/desktop/setup/install/windows-install/."
 	default:
 		return "Install Docker for your operating system from https://docs.docker.com/get-docker/."
 	}
+}
+
+func InstallDocker(ctx context.Context) (string, error) {
+	switch runtime.GOOS {
+	case "darwin":
+		if !hasCommand("brew") {
+			return "", errors.New("Homebrew is required for automatic install on macOS. Install Docker Desktop from https://docs.docker.com/desktop/setup/install/mac-install/")
+		}
+		if _, err := runLong(ctx, "brew", "install", "--cask", "docker-desktop"); err != nil {
+			return "", err
+		}
+		return "Installed Docker Desktop. Open Docker Desktop once to finish setup and start the daemon.", nil
+	case "linux":
+		return installLinux(ctx)
+	case "windows":
+		if !hasCommand("winget") {
+			return "", errors.New("winget is required for automatic install on Windows. Install Docker Desktop from https://docs.docker.com/desktop/setup/install/windows-install/")
+		}
+		if _, err := runLong(ctx, "winget", "install", "-e", "--id", "Docker.DockerDesktop", "--accept-package-agreements", "--accept-source-agreements"); err != nil {
+			return "", err
+		}
+		return "Installed Docker Desktop. Start Docker Desktop once to finish setup and start the daemon.", nil
+	default:
+		return "", fmt.Errorf("automatic Docker install is not supported on %s; install Docker from https://docs.docker.com/get-docker/", runtime.GOOS)
+	}
+}
+
+func installLinux(ctx context.Context) (string, error) {
+	downloader := ""
+	switch {
+	case hasCommand("curl"):
+		downloader = "curl -fsSL https://get.docker.com"
+	case hasCommand("wget"):
+		downloader = "wget -qO- https://get.docker.com"
+	default:
+		return "", errors.New("curl or wget is required to install Docker automatically on Linux")
+	}
+
+	installer := downloader + " | sh"
+	if os.Geteuid() != 0 {
+		if !hasCommand("sudo") {
+			return "", errors.New("sudo is required to install Docker automatically on Linux when not running as root")
+		}
+		installer = downloader + " | sudo -E sh"
+	}
+
+	if _, err := runLong(ctx, "sh", "-c", installer); err != nil {
+		return "", err
+	}
+	return "Installed Docker Engine. You may need to log out and back in before running Docker without sudo.", nil
 }
 
 func ListContainers(ctx context.Context, all bool) ([]Container, error) {
@@ -151,10 +208,26 @@ func RunContainer(ctx context.Context, opts RunOptions) (string, error) {
 	return run(ctx, "docker", args...)
 }
 
+func hasCommand(name string) bool {
+	_, err := exec.LookPath(name)
+	return err == nil
+}
+
 func run(ctx context.Context, name string, args ...string) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
+	return runCommand(ctx, name, args...)
+}
+
+func runLong(ctx context.Context, name string, args ...string) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, 20*time.Minute)
+	defer cancel()
+
+	return runCommand(ctx, name, args...)
+}
+
+func runCommand(ctx context.Context, name string, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, name, args...)
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer

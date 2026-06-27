@@ -27,6 +27,7 @@ type statusMsg docker.Status
 type containersMsg []docker.Container
 type logsMsg string
 type actionMsg string
+type installMsg string
 type errMsg error
 
 type containerItem docker.Container
@@ -120,6 +121,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.message = string(msg)
 		m.err = nil
 		cmds = append(cmds, listContainersCmd(m.all))
+	case installMsg:
+		m.message = string(msg)
+		m.err = nil
+		cmds = append(cmds, checkStatusCmd())
 	case errMsg:
 		m.err = error(msg)
 	case tea.KeyMsg:
@@ -179,6 +184,12 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Cmd, bool) {
 		return nil, true
 	case "r":
 		return tea.Batch(checkStatusCmd(), listContainersCmd(m.all)), true
+	case "i":
+		if m.current == viewStatus && m.statusSet && !m.status.Installed {
+			m.message = "Installing Docker..."
+			m.err = nil
+			return installDockerCmd(), true
+		}
 	case "esc":
 		m.current = viewStatus
 		m.message = ""
@@ -298,6 +309,9 @@ func (m Model) renderStatus() string {
 		lines = append(lines, "Version: "+m.status.Version)
 	}
 	lines = append(lines, "", m.status.Message, "", docker.InstallHint())
+	if !m.status.Installed {
+		lines = append(lines, "", mutedStyle.Render("i install Docker"))
+	}
 	return strings.Join(lines, "\n")
 }
 
@@ -450,6 +464,16 @@ func listContainersCmd(all bool) tea.Cmd {
 			return errMsg(err)
 		}
 		return containersMsg(containers)
+	}
+}
+
+func installDockerCmd() tea.Cmd {
+	return func() tea.Msg {
+		msg, err := docker.InstallDocker(context.Background())
+		if err != nil {
+			return errMsg(err)
+		}
+		return installMsg(msg)
 	}
 }
 
