@@ -27,7 +27,12 @@ type statusMsg docker.Status
 type containersMsg []docker.Container
 type logsMsg string
 type actionMsg string
-type installMsg string
+type installEventMsg struct {
+	line    string
+	done    bool
+	message string
+	err     error
+}
 type errMsg error
 
 type containerItem docker.Container
@@ -66,6 +71,9 @@ type Model struct {
 	message    string
 	err        error
 	logs       string
+	installing bool
+	installCh  chan installEventMsg
+	installLog []string
 	all        bool
 }
 
@@ -121,10 +129,26 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.message = string(msg)
 		m.err = nil
 		cmds = append(cmds, listContainersCmd(m.all))
-	case installMsg:
-		m.message = string(msg)
-		m.err = nil
-		cmds = append(cmds, checkStatusCmd())
+	case installEventMsg:
+		if msg.line != "" {
+			m.installLog = append(m.installLog, msg.line)
+			if len(m.installLog) > 200 {
+				m.installLog = m.installLog[len(m.installLog)-200:]
+			}
+		}
+		if msg.done {
+			m.installing = false
+			m.installCh = nil
+			if msg.err != nil {
+				m.err = msg.err
+			} else {
+				m.message = msg.message
+				m.err = nil
+				cmds = append(cmds, checkStatusCmd())
+			}
+		} else if m.installCh != nil {
+			cmds = append(cmds, waitInstallEventCmd(m.installCh))
+		}
 	case errMsg:
 		m.err = error(msg)
 	case tea.KeyMsg:
@@ -185,10 +209,13 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Cmd, bool) {
 	case "r":
 		return tea.Batch(checkStatusCmd(), listContainersCmd(m.all)), true
 	case "i":
-		if m.current == viewStatus && m.statusSet && !m.status.Installed {
-			m.message = "Installing Docker..."
+		if m.current == viewStatus && m.statusSet && !m.status.Running && !m.installing {
+			m.message = ""
 			m.err = nil
-			return installDockerCmd(), true
+			m.installing = true
+			m.installLog = []string{"Starting Docker installation..."}
+			m.installCh = make(chan installEventMsg, 100)
+			return installDockerCmd(m.installCh), true
 		}
 	case "esc":
 		m.current = viewStatus
@@ -309,8 +336,21 @@ func (m Model) renderStatus() string {
 		lines = append(lines, "Version: "+m.status.Version)
 	}
 	lines = append(lines, "", m.status.Message, "", docker.InstallHint())
-	if !m.status.Installed {
-		lines = append(lines, "", mutedStyle.Render("i install Docker"))
+	if !m.status.Running {
+		lines = append(lines, "", mutedStyle.Render("i install Docker components"))
+	}
+	if len(m.installLog) > 0 {
+		lines = append(lines, "", titleStyle.Render("Installation Details"))
+		details := m.installLog
+		if len(details) > installDetailLimit(m.height) {
+			details = details[len(details)-installDetailLimit(m.height):]
+		}
+		for _, line := range details {
+			lines = append(lines, mutedStyle.Render(line))
+		}
+		if m.installing {
+			lines = append(lines, mutedStyle.Render("Installing..."))
+		}
 	}
 	return strings.Join(lines, "\n")
 }
@@ -467,14 +507,41 @@ func listContainersCmd(all bool) tea.Cmd {
 	}
 }
 
-func installDockerCmd() tea.Cmd {
+func installDockerCmd(ch chan installEventMsg) tea.Cmd {
 	return func() tea.Msg {
-		msg, err := docker.InstallDocker(context.Background())
-		if err != nil {
-			return errMsg(err)
-		}
-		return installMsg(msg)
+		go func() {
+			msg, err := docker.InstallDockerWithOutput(context.Background(), func(line string) {
+				ch <- installEventMsg{line: line}
+			})
+			ch <- installEventMsg{done: true, message: msg, err: err}
+			close(ch)
+		}()
+		return <-ch
 	}
+}
+
+func waitInstallEventCmd(ch <-chan installEventMsg) tea.Cmd {
+	return func() tea.Msg {
+		msg, ok := <-ch
+		if !ok {
+			return installEventMsg{done: true}
+		}
+		return msg
+	}
+}
+
+func installDetailLimit(height int) int {
+	if height <= 0 {
+		return 12
+	}
+	limit := height - 18
+	if limit < 6 {
+		return 6
+	}
+	if limit > 18 {
+		return 18
+	}
+	return limit
 }
 
 func dockerfileInputs() []textinput.Model {

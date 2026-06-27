@@ -1,14 +1,17 @@
 package docker
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -34,6 +37,8 @@ type RunOptions struct {
 	Ports  string
 	Detach bool
 }
+
+type OutputFunc func(string)
 
 func CheckStatus(ctx context.Context) Status {
 	if _, err := exec.LookPath("docker"); err != nil {
@@ -83,22 +88,26 @@ func InstallHint() string {
 }
 
 func InstallDocker(ctx context.Context) (string, error) {
+	return InstallDockerWithOutput(ctx, nil)
+}
+
+func InstallDockerWithOutput(ctx context.Context, output OutputFunc) (string, error) {
 	switch runtime.GOOS {
 	case "darwin":
 		if !hasCommand("brew") {
 			return "", errors.New("Homebrew is required for automatic install on macOS. Install Docker Desktop from https://docs.docker.com/desktop/setup/install/mac-install/")
 		}
-		if _, err := runLong(ctx, "brew", "install", "--cask", "docker-desktop"); err != nil {
+		if _, err := runLongWithOutput(ctx, output, "brew", "install", "--cask", "docker-desktop"); err != nil {
 			return "", err
 		}
 		return "Installed Docker Desktop. Open Docker Desktop once to finish setup and start the daemon.", nil
 	case "linux":
-		return installLinux(ctx)
+		return installLinux(ctx, output)
 	case "windows":
 		if !hasCommand("winget") {
 			return "", errors.New("winget is required for automatic install on Windows. Install Docker Desktop from https://docs.docker.com/desktop/setup/install/windows-install/")
 		}
-		if _, err := runLong(ctx, "winget", "install", "-e", "--id", "Docker.DockerDesktop", "--accept-package-agreements", "--accept-source-agreements"); err != nil {
+		if _, err := runLongWithOutput(ctx, output, "winget", "install", "-e", "--id", "Docker.DockerDesktop", "--accept-package-agreements", "--accept-source-agreements"); err != nil {
 			return "", err
 		}
 		return "Installed Docker Desktop. Start Docker Desktop once to finish setup and start the daemon.", nil
@@ -107,7 +116,7 @@ func InstallDocker(ctx context.Context) (string, error) {
 	}
 }
 
-func installLinux(ctx context.Context) (string, error) {
+func installLinux(ctx context.Context, output OutputFunc) (string, error) {
 	downloader := ""
 	switch {
 	case hasCommand("curl"):
@@ -126,7 +135,7 @@ func installLinux(ctx context.Context) (string, error) {
 		installer = downloader + " | sudo -E sh"
 	}
 
-	if _, err := runLong(ctx, "sh", "-c", installer); err != nil {
+	if _, err := runLongWithOutput(ctx, output, "sh", "-c", installer); err != nil {
 		return "", err
 	}
 	return "Installed Docker Engine. You may need to log out and back in before running Docker without sudo.", nil
@@ -221,20 +230,62 @@ func run(ctx context.Context, name string, args ...string) (string, error) {
 }
 
 func runLong(ctx context.Context, name string, args ...string) (string, error) {
+	return runLongWithOutput(ctx, nil, name, args...)
+}
+
+func runLongWithOutput(ctx context.Context, output OutputFunc, name string, args ...string) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, 20*time.Minute)
 	defer cancel()
 
-	return runCommand(ctx, name, args...)
+	return runCommandWithOutput(ctx, output, name, args...)
 }
 
 func runCommand(ctx context.Context, name string, args ...string) (string, error) {
+	return runCommandWithOutput(ctx, nil, name, args...)
+}
+
+func runCommandWithOutput(ctx context.Context, output OutputFunc, name string, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, name, args...)
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
 
-	if err := cmd.Run(); err != nil {
+	if output == nil {
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+		if err := cmd.Run(); err != nil {
+			msg := strings.TrimSpace(stderr.String())
+			if msg == "" {
+				msg = strings.TrimSpace(stdout.String())
+			}
+			if msg == "" {
+				msg = err.Error()
+			}
+			return "", fmt.Errorf("%s %s: %s", name, strings.Join(args, " "), msg)
+		}
+		return stdout.String(), nil
+	}
+
+	output("$ " + name + " " + strings.Join(args, " "))
+
+	stdoutPipe, err := cmd.StdoutPipe()
+	if err != nil {
+		return "", err
+	}
+	stderrPipe, err := cmd.StderrPipe()
+	if err != nil {
+		return "", err
+	}
+	if err := cmd.Start(); err != nil {
+		return "", err
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go scanCommandOutput(stdoutPipe, &stdout, output, &wg)
+	go scanCommandOutput(stderrPipe, &stderr, output, &wg)
+	wg.Wait()
+
+	if err := cmd.Wait(); err != nil {
 		msg := strings.TrimSpace(stderr.String())
 		if msg == "" {
 			msg = strings.TrimSpace(stdout.String())
@@ -245,4 +296,19 @@ func runCommand(ctx context.Context, name string, args ...string) (string, error
 		return "", fmt.Errorf("%s %s: %s", name, strings.Join(args, " "), msg)
 	}
 	return stdout.String(), nil
+}
+
+func scanCommandOutput(r io.Reader, buf *bytes.Buffer, output OutputFunc, wg *sync.WaitGroup) {
+	defer wg.Done()
+
+	scanner := bufio.NewScanner(r)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	for scanner.Scan() {
+		line := scanner.Text()
+		buf.WriteString(line)
+		buf.WriteByte('\n')
+		if strings.TrimSpace(line) != "" {
+			output(line)
+		}
+	}
 }

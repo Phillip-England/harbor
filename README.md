@@ -16,7 +16,7 @@ go run .
 ## Controls
 
 - `1` status and install guidance
-- `i` install Docker when the status screen reports the CLI is missing
+- `i` install Docker components when the status screen reports Docker is missing or unavailable
 - `2` containers
 - `3` create Dockerfile
 - `4` run container
@@ -34,3 +34,4 @@ Harbor shells out to the local `docker` command. When Docker is missing, Harbor 
 - Windows: Docker Desktop through winget
 
 Docker Desktop still needs to be opened once after installation so it can finish setup and start the daemon. Linux users may need to log out and back in before running Docker without `sudo`.
+Installation output is shown in the status screen while the installer runs.
